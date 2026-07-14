@@ -1,5 +1,7 @@
 # DECO x ManiSkill-ViTac 2026: end-to-end training pipeline
 
+*[中文版](MANISKILL_VITAC2026_PIPELINE.zh-CN.md)*
+
 This is a runbook for the fork's adaptation of DECO to the official ManiSkill-ViTac 2026
 LeRobot (v3.0) data contract. It covers the data pipeline, the two-stage training recipe,
 every bug that had to be fixed to get a real training run going, and how to reproduce the
