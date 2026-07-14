@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+import numpy as np
 import torch
 import yaml
 from tqdm import tqdm
@@ -18,9 +19,12 @@ split (never the val split -- stats leaking from val into normalization would le
 loss look better than it should). Output is a `data:` yaml block you paste into
 config/deco_vitac2026_*.yaml.
 
-Uses `LeRobotDataset.select_columns(...)`, which returns raw per-frame values without
-decoding any of the 6 image streams, so this stays fast even on the full ~500-episode /
-~500k-frame dataset.
+Loads the dataset UNFILTERED and restricts to train rows by position (same approach as
+lerobot_dataset.py's ManiskillVitacDataset), rather than passing `episodes=` to
+LeRobotDataset. Passing a large `episodes=` list is dramatically slower in lerobot 0.4.4 --
+confirmed on KaiyueChen/black_smash_03 (500 episodes, ~50GB): filtering to the ~450 train
+episodes this way didn't finish in 20+ minutes, whereas the unfiltered load + column access
+below runs in well under a minute.
 """
 
 
@@ -29,9 +33,14 @@ def cal_mean_std(repo_id, root=None, val_ratio=0.1, split_seed=42, obs_dim=20, a
     train_episodes, _ = episode_split(meta.total_episodes, val_ratio, split_seed)
     print(f"train episodes: {len(train_episodes)} / {meta.total_episodes}")
 
-    dataset = LeRobotDataset(repo_id, root=root, episodes=train_episodes)
-    cols = dataset.select_columns(["observation.state", "actions"])
-    n = len(cols)
+    dataset = LeRobotDataset(repo_id, root=root)
+    episode_col = dataset.hf_dataset.data.column("episode_index").to_numpy()
+    train_positions = np.where(np.isin(episode_col, np.array(train_episodes)))[0]
+    n = len(train_positions)
+    print(f"train frames: {n} / {len(episode_col)}")
+
+    obs_col = dataset.hf_dataset.data.column("observation.state")
+    act_col = dataset.hf_dataset.data.column("actions")
 
     obs_sum = torch.zeros(obs_dim, dtype=torch.float64)
     obs_sq_sum = torch.zeros(obs_dim, dtype=torch.float64)
@@ -44,9 +53,9 @@ def cal_mean_std(repo_id, root=None, val_ratio=0.1, split_seed=42, obs_dim=20, a
     act_max = torch.full((action_dim,), float("-inf"))
 
     for start in tqdm(range(0, n, batch_size)):
-        batch = cols[start : start + batch_size]
-        obs = torch.stack(batch["observation.state"]).double()
-        act = torch.stack(batch["actions"]).double()
+        idx = train_positions[start : start + batch_size]
+        obs = torch.from_numpy(np.stack(obs_col.take(idx).to_numpy(zero_copy_only=False))).double()
+        act = torch.from_numpy(np.stack(act_col.take(idx).to_numpy(zero_copy_only=False))).double()
 
         obs_sum += obs.sum(dim=0)
         obs_sq_sum += (obs**2).sum(dim=0)

@@ -78,7 +78,8 @@ def train(net, net_without_ddp, train_loader, optimizer, criterion, warmup_sched
                 step = (epoch - 1) * len(train_loader) + batch_idx
                 wandb.log({'train/step_loss': loss.item(), 'lr': current_lr, 'epoch': epoch}, step=step)
 
-    dist.barrier()
+    if dist.is_initialized():
+        dist.barrier()
     epoch_loss = total_loss / len(train_loader)
     if epoch % opt.save_period == 0 and local_rank == 0:
         print('save model to logs')
@@ -117,14 +118,16 @@ def val(net, test_loader, criterion, epoch, opt, act_dim, chunksize, obs_state, 
             total_loss += loss.item()
 
             ae = (mask_full * torch.abs(out - action)).sum(0)  # (chunksize, act_dim)
-            dist.all_reduce(ae)
+            if dist.is_initialized():
+                dist.all_reduce(ae)
             mae += ae
             if local_rank == 0:
                 ae_print = [round(x / opt.batch_size / chunksize, 2) for x in ae.sum(0).tolist()]
                 pbar.set_postfix(**{'val_loss': total_loss / (batch_idx + 1), 'AE': ae_print})
                 pbar.update(1)
 
-    dist.barrier()
+    if dist.is_initialized():
+        dist.barrier()
     mae = mae / len(test_loader) / opt.batch_size
     mae = torch.round(mae * 100) / 100
     epoch_loss = total_loss / len(test_loader)
