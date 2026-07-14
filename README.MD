@@ -234,6 +234,59 @@ cd deploy
 python deploy_h1.py --network-interface=enx9c69d30201e2
 ```
 
+# ManiSkill-ViTac 2026 adaptation
+
+This fork adapts DECO to the official ManiSkill-ViTac 2026 LeRobot (v3.0) data contract:
+20-D per-arm state/action, 2 wrist RGB cameras, 4 vision-based tactile RGB streams, and
+free-form language task prompts instead of a fixed one-hot task set. Key additions:
+
+- `lerobot_dataset.py` / `lerobot_compat.py` -- wraps lerobot's own `LeRobotDataset`
+  (rather than reading parquet by hand) and adapts it to the `(img1, img2, tactile_imgs,
+  obs, action, mask, lang_embed)` 7-tuple the model expects.
+- `models/deco_vitac/` -- `DECOVitac`, decoupling `obs_dim` from `act_dim` and swapping the
+  original 1062-dim per-hand tactile scalars for 4 vision-based tactile RGB streams
+  (`tactile_img_encoder.py`). Reuses DECO's `MMAttention` (joint self-attention + tactile
+  cross-attention + LoRA plugin adapter) unchanged.
+- `lang_encoder.py` -- frozen `sentence-transformers/all-MiniLM-L6-v2` text encoder for
+  conditioning on the task prompt; `utils/cal_text_embeddings.py` precomputes an embedding
+  cache per unique task string so training doesn't run the text encoder every step.
+- `utils/cal_mean_std_lerobot.py` -- computes observation/action normalization stats from a
+  LeRobot dataset's train split only (never val).
+- `config/deco_vitac2026_vis.yaml` / `config/deco_vitac2026_tactile.yaml` -- DECO's own
+  two-stage recipe: train the vision-only backbone first, then freeze it and fine-tune only
+  the tactile encoder + cross-attention + LoRA plugin adapter (`plugin: True`,
+  `pretrain_model_path` pointing at stage 1's checkpoint).
+
+Both configs set `data_format: lerobot` (routes through `lerobot_dataset.py` instead of the
+original `dataset.py`).
+
+### Known upstream data bug
+
+Converting an official v2.1 dataset with `lerobot.datasets.v30.convert_dataset_v21_to_v30`
+carries the `index` column over verbatim from the v2.1 source instead of renumbering it to
+match the freshly-computed `dataset_from_index`/`dataset_to_index` boundaries. Since
+`LeRobotDataset` uses `index` directly as a row position when no `episodes=` subset is
+requested, this makes delta_timestamps chunk queries fall outside their own episode for
+every episode but the first -- `actions_is_pad` ends up `True` for the whole chunk,
+including the current frame, so a batch drawn entirely from those episodes gets
+`mask.sum() == 0` and `_masked_flow_loss` divides 0/0 into `NaN`. Confirmed against
+`KaiyueChen/black_smash_03` (499/500 episodes affected). Fix locally after conversion:
+```bash
+python -m lerobot.datasets.v30.convert_dataset_v21_to_v30 --repo-id=<repo_id> --push-to-hub=false
+python utils/fix_v30_dataset_index.py --root ~/.cache/huggingface/lerobot/<repo_id>
+```
+
+### Training
+
+```bash
+# stage 1: vision-only backbone
+torchrun --nproc_per_node <N> train.py --config config/deco_vitac2026_vis.yaml --distributed True --amp True --wandb
+
+# stage 2: freeze stage-1 backbone, train tactile encoder + cross-attention + LoRA plugin
+# (fill in config/deco_vitac2026_tactile.yaml's `pretrain_model_path` with stage 1's best.pth first)
+torchrun --nproc_per_node <N> train.py --config config/deco_vitac2026_tactile.yaml --distributed True --amp True --wandb
+```
+
 # Citation
 If you find this project useful for your research, please consider citing our paper:
 

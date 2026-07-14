@@ -1,0 +1,57 @@
+# DECO adapted to the ManiSkill-ViTac 2026 / official LeRobot data contract -- vision +
+# tactile ("vitac") variant. Stage 2 of DECO's own two-stage recipe: freezes the
+# vision-only backbone trained by config/deco_vitac2026_vis.yaml and only trains the new
+# tactile image encoder + tactile cross-attention + PI_Adapter (LoRA) params
+# (see models/deco_vitac/deco_vitac.py's `modeling()` pretrain_model_path/plugin branch).
+model_name: deco_vitac
+data_format: lerobot
+
+model:
+  action_dim: 20
+  obs_dim: 20
+  chunk_size: 32
+  obs_state: True
+  use_tactile: True
+  plugin: True                # decoupled LoRA-rank adapter injection, not joint/coupled fusion
+  plugin_rank: 32
+  use_language_condition: True
+  lang_embed_dim: 384
+  tactile_pool_size: 2         # per-sensor spatial tokens = pool_size**2; 4 sensors -> 16 tactile tokens total (t_hist=1)
+  tactile_t_hist: 1            # bump to 2 (current + previous frame) later if contact dynamics matter -- see PDF 7.2
+  num_attn_blocks: 6
+  inf_step: 5
+  heads: 8
+  dim: 512
+  rope_axes_dim: [256, 256]
+  img_pretrain: /root/.cache/torch/hub/checkpoints/resnet34-b627a593.pth
+  freeze_backbone: False       # irrelevant here: img_encoder weights come from pretrain_model_path below, not img_pretrain
+  # Fill in after stage 1 (deco_vitac2026_vis) has trained -- e.g. ./logs/log_deco_vitac_vis/best.pth
+  pretrain_model_path: false
+  adapter_model_path: False    # set to a saved adapter checkpoint for inference-only loading
+
+dataset:
+  repo_id: KaiyueChen/black_smash_03
+  root: null
+  val_ratio: 0.1
+  split_seed: 42
+  lang_embed_cache: ./assets/lang_embeddings/black_smash_03.json
+
+data:
+  chunk_size: 32
+  norm_type: mean_std
+  # Whole-stream tactile dropout (PDF 7.3): forces the policy to keep using vision instead
+  # of only relying on tactile once it's available. Validate with tactile zero/shuffle runs.
+  tactile_dropout: 0.15
+  # Same placeholder stats as deco_vitac2026_vis.yaml -- MUST be regenerated from the full
+  # train split (utils/cal_mean_std_lerobot.py) before real training. Keep these identical
+  # between the vis and tactile configs so stage-2 fine-tuning sees the same normalization
+  # the stage-1 backbone was trained on.
+  observation_mean: [-0.07505194842815399, 0.1118096113204956, -0.00019662982958834618, -0.007772946264594793, 0.09330198913812637, -0.3013076186180115, 0.10382263362407684, 0.05269996449351311, 0.0662611722946167, 0.008818266913294792, 0.12917475402355194, 0.053497955203056335, 0.3045417368412018, 0.09960360080003738, 0.15127599239349365, 0.2561485469341278, 0.09142258018255234, -0.22560714185237885, -0.862606406211853, 1.7404444217681885]
+  observation_std: [0.09710181504487991, 0.11950922757387161, 0.056431375443935394, 0.37624043226242065, 0.29956182837486267, 0.43860846757888794, 0.02638467401266098, 0.06675742566585541, 0.09470359236001968, 0.036634691059589386, 0.190562441945076, 0.1158476173877716, 0.4495793879032135, 0.026234082877635956, 0.07318101078271866, 0.09585364162921906, 0.11034400761127472, 0.3939315974712372, 0.4109851121902466, 0.6047418713569641]
+  action_mean: [6.026021992511232e-08, 1.695600076345727e-05, -9.97947722680692e-07, 0.9990655779838562, -2.8066519007552415e-05, -4.2205603676848114e-05, 1.3103398487146478e-05, 0.9990478754043579, 6.238812784431502e-05, 0.10371170938014984, 1.3404021046881098e-05, -1.099162909667939e-05, -3.727496732608415e-05, 0.9990857243537903, 5.327026519807987e-05, -3.727433067979291e-05, -5.3500360081670806e-05, 0.9990828037261963, 6.564467184944078e-05, 0.09949871152639389]
+  action_std: [0.0015629237750545144, 0.0020801867358386517, 0.0012187319807708263, 0.029906442388892174, 0.007709525525569916, 0.0043449741788208485, 0.007733117789030075, 0.029906176030635834, 0.007339906878769398, 0.02655988745391369, 0.0010093344608321786, 0.0008871838799677789, 0.000584831868764013, 0.02990695647895336, 0.005171663127839565, 0.0033534690737724304, 0.005172508303076029, 0.029906902462244034, 0.004137624520808458, 0.02639736421406269]
+
+img:
+  img_size: [224, 224]
+  img_mean: [0.485, 0.456, 0.406]
+  img_std: [0.229, 0.224, 0.225]

@@ -1,7 +1,9 @@
 import torch
 import importlib
+import numpy as np
 from PIL import Image
 from torchvision.transforms import v2 as transforms
+from lang_encoder import FrozenTextEncoder, DEFAULT_LANG_MODEL
 
 
 class letterbox():
@@ -84,6 +86,90 @@ def postprocess(action, yaml_config):
         action_min = torch.tensor(yaml_config['data']['action_min'])
         action_max = torch.tensor(yaml_config['data']['action_max'])
         action = action * (action_max - action_min)[None, :] + action_min[None, :]
+    return action
+
+
+def _prep_image_tensor(img: np.ndarray, img_size, img_mean, img_std) -> torch.Tensor:
+    """HWC uint8 (or float) numpy image -> normalized CHW float tensor, no augmentation.
+    Shared by both RGB cameras and the 4 vision-based tactile streams -- same normalization
+    used in lerobot_dataset.py's rgb_transform/tactile_transform (minus the training-only
+    color jitter / dropout).
+    """
+    transform = transforms.Compose([
+        transforms.ToImage(),
+        transforms.ToDtype(torch.float32, scale=True),
+        transforms.Resize(list(img_size)),
+        transforms.Normalize(mean=img_mean, std=img_std),
+    ])
+    return transform(img)
+
+
+_VITAC_TACTILE_KEYS_ORDER = ("tactile_left_0", "tactile_right_0", "tactile_left_1", "tactile_right_1")
+
+_lang_encoder_cache = {}
+
+
+def _get_lang_encoder(model_name=DEFAULT_LANG_MODEL, device="cpu") -> FrozenTextEncoder:
+    # Loading the tokenizer/model is slow; keep one frozen instance around across calls.
+    key = (model_name, device)
+    if key not in _lang_encoder_cache:
+        _lang_encoder_cache[key] = FrozenTextEncoder(model_name=model_name, device=device)
+    return _lang_encoder_cache[key]
+
+
+def preprocess_vitac(img1, img2, obs, yaml_config, tactile_imgs: dict = None):
+    """Preprocessing for the deco_vitac model family (models/deco_vitac/).
+
+    Args:
+        img1, img2: HWC numpy arrays (observation.images.camera0/1)
+        obs: 1D array-like, length model.obs_dim (20 for the ManiSkill-ViTac 2026 contract)
+        tactile_imgs: optional dict with keys tactile_left_0/tactile_right_0/tactile_left_1/
+            tactile_right_1 -> HWC numpy arrays. Required iff yaml_config['model']['use_tactile'].
+    """
+    data_cfg = yaml_config['data']
+    obs = torch.tensor(obs, dtype=torch.float32)
+    obs_mean = torch.tensor(data_cfg['observation_mean'])
+    obs_std = torch.tensor(data_cfg['observation_std']).clamp_min(1e-8)
+    obs = ((obs - obs_mean) / obs_std).unsqueeze(0)  # (1, obs_dim)
+
+    img_cfg = yaml_config['img']
+    img1_t = _prep_image_tensor(img1, img_cfg['img_size'], img_cfg['img_mean'], img_cfg['img_std']).unsqueeze(0)
+    img2_t = _prep_image_tensor(img2, img_cfg['img_size'], img_cfg['img_mean'], img_cfg['img_std']).unsqueeze(0)
+
+    use_tactile = yaml_config['model'].get('use_tactile', False)
+    if use_tactile:
+        if tactile_imgs is None:
+            raise ValueError("model.use_tactile is True but no tactile_imgs were provided")
+        frames = [
+            _prep_image_tensor(tactile_imgs[k], img_cfg['img_size'], img_cfg['img_mean'], img_cfg['img_std'])
+            for k in _VITAC_TACTILE_KEYS_ORDER
+        ]
+        tactile_t = torch.stack(frames, dim=0).unsqueeze(0)  # (1, n_sensors, 3, H, W)
+    else:
+        h, w = img_cfg['img_size']
+        tactile_t = torch.zeros(1, 4, 3, h, w)
+
+    return img1_t, img2_t, obs, tactile_t
+
+
+def predict_action_vitac(model, device, yaml_config, img1, img2, obs, prompt: str, tactile_imgs: dict = None, lang_model_name=DEFAULT_LANG_MODEL):
+    """Run one flow-matching inference pass for a models/deco_vitac model.
+
+    `prompt` is embedded on the fly with the same frozen text encoder used at training
+    time (rather than looked up in the training-time cache), since the deployed prompt may
+    not have been seen during training.
+    """
+    with torch.no_grad():
+        img1_t, img2_t, obs_t, tactile_t = preprocess_vitac(img1, img2, obs, yaml_config, tactile_imgs=tactile_imgs)
+        img1_t, img2_t, obs_t, tactile_t = img1_t.to(device), img2_t.to(device), obs_t.to(device), tactile_t.to(device)
+
+        encoder = _get_lang_encoder(model_name=lang_model_name, device="cpu")
+        lang_embed = encoder.embed(prompt).to(device)  # (1, lang_embed_dim)
+
+        action = model(img1_t, img2_t, obs=obs_t, act=None, lang_embed=lang_embed, tactile_imgs=tactile_t, action_mask=None, training=False)
+        action = action.cpu().squeeze(0)  # (chunksize, act_dim)
+        action = postprocess(action, yaml_config)
+
     return action
 
 

@@ -1,0 +1,57 @@
+# DECO adapted to the ManiSkill-ViTac 2026 / official LeRobot data contract -- vision-only
+# (no tactile) variant. Train this first; config/deco_vitac2026_tactile.yaml's plugin
+# adapter is fine-tuned on top of this checkpoint (`pretrain_model_path`).
+model_name: deco_vitac
+data_format: lerobot   # read via lerobot_dataset.py instead of the original dataset.py
+
+model:
+  action_dim: 20             # official 20D action (see PDF: per-arm 3D delta-xyz + 6D rotation delta + 1D absolute gripper width, x2)
+  obs_dim: 20                 # official 20D state (per-arm 6D relative-to-episode-start pose + 1D gripper width, x2, + 6D inter-hand relative pose)
+  chunk_size: 32               # K=32, matches the official replay/chunking convention (~1.07s at 30fps)
+  obs_state: True
+  use_tactile: False
+  plugin: False
+  plugin_rank: 32
+  use_language_condition: True # condition on the task prompt instead of a one-hot task index
+  lang_embed_dim: 384          # sentence-transformers/all-MiniLM-L6-v2 output dim
+  tactile_pool_size: 2         # unused when use_tactile=False, kept for symmetry with the tactile config
+  tactile_t_hist: 1
+  num_attn_blocks: 6
+  inf_step: 5
+  heads: 8
+  dim: 512
+  rope_axes_dim: [256, 256]
+  img_pretrain: /root/.cache/torch/hub/checkpoints/resnet34-b627a593.pth
+  freeze_backbone: False
+  pretrain_model_path: False
+  adapter_model_path: False
+
+# Dataset location + split. Point `root` at a local v3.0 dataset directory (run
+# lerobot.scripts.convert_dataset_v21_to_v30 once on the officially-released v2.1 shards
+# first -- see utils/cal_mean_std_lerobot.py's docstring), or leave it null to stream from
+# the HF Hub via `repo_id`.
+dataset:
+  repo_id: KaiyueChen/black_smash_03
+  root: null
+  val_ratio: 0.1
+  split_seed: 42
+  lang_embed_cache: ./assets/lang_embeddings/black_smash_03.json  # built by utils/cal_text_embeddings.py
+
+data:
+  chunk_size: 32
+  norm_type: mean_std
+  tactile_dropout: 0.0   # no tactile input in this config, dropout would be a no-op
+  # Placeholder stats from a 5-episode smoke sample of KaiyueChen/black_smash_03 -- MUST be
+  # regenerated from the full train split before real training:
+  #   python utils/cal_mean_std_lerobot.py --repo-id KaiyueChen/black_smash_03 --root <local v3.0 dir> \
+  #       --save-path assets/stats/black_smash_03.yaml
+  # then paste the resulting `observation_*`/`action_*` lists in here.
+  observation_mean: [-0.07505194842815399, 0.1118096113204956, -0.00019662982958834618, -0.007772946264594793, 0.09330198913812637, -0.3013076186180115, 0.10382263362407684, 0.05269996449351311, 0.0662611722946167, 0.008818266913294792, 0.12917475402355194, 0.053497955203056335, 0.3045417368412018, 0.09960360080003738, 0.15127599239349365, 0.2561485469341278, 0.09142258018255234, -0.22560714185237885, -0.862606406211853, 1.7404444217681885]
+  observation_std: [0.09710181504487991, 0.11950922757387161, 0.056431375443935394, 0.37624043226242065, 0.29956182837486267, 0.43860846757888794, 0.02638467401266098, 0.06675742566585541, 0.09470359236001968, 0.036634691059589386, 0.190562441945076, 0.1158476173877716, 0.4495793879032135, 0.026234082877635956, 0.07318101078271866, 0.09585364162921906, 0.11034400761127472, 0.3939315974712372, 0.4109851121902466, 0.6047418713569641]
+  action_mean: [6.026021992511232e-08, 1.695600076345727e-05, -9.97947722680692e-07, 0.9990655779838562, -2.8066519007552415e-05, -4.2205603676848114e-05, 1.3103398487146478e-05, 0.9990478754043579, 6.238812784431502e-05, 0.10371170938014984, 1.3404021046881098e-05, -1.099162909667939e-05, -3.727496732608415e-05, 0.9990857243537903, 5.327026519807987e-05, -3.727433067979291e-05, -5.3500360081670806e-05, 0.9990828037261963, 6.564467184944078e-05, 0.09949871152639389]
+  action_std: [0.0015629237750545144, 0.0020801867358386517, 0.0012187319807708263, 0.029906442388892174, 0.007709525525569916, 0.0043449741788208485, 0.007733117789030075, 0.029906176030635834, 0.007339906878769398, 0.02655988745391369, 0.0010093344608321786, 0.0008871838799677789, 0.000584831868764013, 0.02990695647895336, 0.005171663127839565, 0.0033534690737724304, 0.005172508303076029, 0.029906902462244034, 0.004137624520808458, 0.02639736421406269]
+
+img:
+  img_size: [224, 224]
+  img_mean: [0.485, 0.456, 0.406]
+  img_std: [0.229, 0.224, 0.225]

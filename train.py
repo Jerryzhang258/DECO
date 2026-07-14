@@ -17,6 +17,11 @@ try:
     from torch.optim.lr_scheduler import _LRScheduler
 except:
     from torch.optim.lr_scheduler import LRScheduler as _LRScheduler
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -140,46 +145,83 @@ def main(opt):
         with open(os.path.join(opt.logs, 'result.txt'), 'a+') as f:
             f.writelines('----------------training logs----------------\n %s \n \n' % str(opt))
 
+        if opt.wandb:
+            if not WANDB_AVAILABLE:
+                print('wandb requested but not installed (pip install wandb); continuing without it')
+                opt.wandb = False
+            else:
+                wandb.init(
+                    project=opt.wandb_project,
+                    entity=opt.wandb_entity,
+                    name=opt.wandb_run_name or os.path.basename(opt.logs.rstrip('/')),
+                    config=vars(opt),
+                )
     else:
         loss_history = None
 
 
     config = yaml.safe_load(open(opt.config, 'r'))
+    if local_rank == 0 and opt.wandb:
+        wandb.config.update({'yaml_config': config})
     act_dim, chunksize, obs_state = config['model']['action_dim'], config['model']['chunk_size'], config['model']['obs_state']
     img_size = config['img']['img_size']
     img_mean, img_std = config['img']['img_mean'], config['img']['img_std']
     model_name = config['model_name']
-    find_unused_parameters = model_name == 'deco'
+    find_unused_parameters = model_name in ('deco', 'deco_vitac')
     importmodule = importlib.import_module(f"models.{model_name}")
+    data_format = config.get('data_format', 'raw')
+    # picked up by models/deco_vitac/train_one_epoch.py; irrelevant (and harmless) for other models
+    opt.tactile_dropout = config['data'].get('tactile_dropout', 0.0)
 
-    if img_size[0] != img_size[1]:
-        print('use transform.Resize to ', img_size)
-        resize_transform = transforms.Resize(img_size)
+    if data_format == 'lerobot':
+        # ManiSkill-ViTac 2026 / official LeRobot-format data (see lerobot_dataset.py).
+        from lerobot_dataset import ManiskillVitacDataset
+        ds_cfg = config['dataset']
+        common_kwargs = dict(
+            repo_id=ds_cfg['repo_id'],
+            root=ds_cfg.get('root'),
+            use_tactile=config['model'].get('use_tactile', False),
+            tactile_t_hist=config['model'].get('tactile_t_hist', 1),
+            img_size=img_size,
+            img_mean=img_mean,
+            img_std=img_std,
+            lang_embed_cache=ds_cfg.get('lang_embed_cache'),
+            lang_embed_dim=config['model'].get('lang_embed_dim', 384),
+            val_ratio=ds_cfg.get('val_ratio', 0.1),
+            split_seed=ds_cfg.get('split_seed', 42),
+            **config['data'],
+        )
+        train_dataset = ManiskillVitacDataset(train=True, train_augment=True, **common_kwargs)
+        test_dataset = ManiskillVitacDataset(train=False, train_augment=False, **common_kwargs)
     else:
-        print('use letterbox to ', img_size)
-        resize_transform = letterbox(img_size[0], fill=128)
-        
-    train_transform = transforms.Compose([
-        resize_transform,
-        transforms.RandomApply([transforms.ColorJitter(brightness=(0.7, 1.3), contrast=(0.8, 1.2), saturation=(0.8, 1.2))], p=0.5),
-        transforms.RandomApply([transforms.GaussianBlur(kernel_size=(random.choice([3, 5, 7])), sigma=random.uniform(0.1, 2))], p=0.5),
-        transforms.ToImage(),
-        transforms.ToDtype(torch.float32, scale=True),
-        transforms.Normalize(
-            mean=img_mean, 
-            std=img_std),
-        ])
+        if img_size[0] != img_size[1]:
+            print('use transform.Resize to ', img_size)
+            resize_transform = transforms.Resize(img_size)
+        else:
+            print('use letterbox to ', img_size)
+            resize_transform = letterbox(img_size[0], fill=128)
 
-    test_transform = transforms.Compose([
-        resize_transform,
-        transforms.ToImage(),
-        transforms.ToDtype(torch.float32, scale=True),
-        transforms.Normalize(
-            mean=img_mean, 
-            std=img_std)
-        ])
-    train_dataset = my_Dataset(data_dir=opt.data, train=True, transform=train_transform, **config['data'])
-    test_dataset = my_Dataset(data_dir=opt.data, train=False, transform=test_transform, **config['data'])
+        train_transform = transforms.Compose([
+            resize_transform,
+            transforms.RandomApply([transforms.ColorJitter(brightness=(0.7, 1.3), contrast=(0.8, 1.2), saturation=(0.8, 1.2))], p=0.5),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=(random.choice([3, 5, 7])), sigma=random.uniform(0.1, 2))], p=0.5),
+            transforms.ToImage(),
+            transforms.ToDtype(torch.float32, scale=True),
+            transforms.Normalize(
+                mean=img_mean,
+                std=img_std),
+            ])
+
+        test_transform = transforms.Compose([
+            resize_transform,
+            transforms.ToImage(),
+            transforms.ToDtype(torch.float32, scale=True),
+            transforms.Normalize(
+                mean=img_mean,
+                std=img_std)
+            ])
+        train_dataset = my_Dataset(data_dir=opt.data, train=True, transform=train_transform, **config['data'])
+        test_dataset = my_Dataset(data_dir=opt.data, train=False, transform=test_transform, **config['data'])
 
     if opt.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, shuffle=True)
@@ -275,9 +317,18 @@ def main(opt):
             lr_scheduler.step()
             
         if local_rank == 0:
+            current_lr = optimizer.state_dict()['param_groups'][0]['lr']
             loss_history.append_loss(train_loss, val_loss)
             print('current best epoch:', save_epoch, '\n')
-            print('lr:', optimizer.state_dict()['param_groups'][0]['lr'], '\n')
+            print('lr:', current_lr, '\n')
+            if opt.wandb:
+                wandb.log({
+                    'train/epoch_loss': train_loss,
+                    'val/epoch_loss': val_loss,
+                    'lr': current_lr,
+                    'epoch': epoch,
+                    'best_epoch': save_epoch,
+                })
             save_file = {'model': net_without_ddp.state_dict(),
                          'optimizer': optimizer.state_dict(),
                          'lr_scheduler': lr_scheduler.state_dict(),
@@ -285,6 +336,9 @@ def main(opt):
             if opt.amp:
                 save_file["scaler"] = scaler.state_dict()
             torch.save(save_file, os.path.join(opt.logs, "last_weights.pth"))
+
+    if local_rank == 0 and opt.wandb:
+        wandb.finish()
 
     if dist.is_initialized():
         dist.destroy_process_group()
@@ -309,6 +363,10 @@ if __name__ == '__main__':
     parser.add_argument('--amp', default=True, type=bool, help='Enable automatic mixed precision training')
     parser.add_argument('--num-workers', type=int, default=16, help='Number of workers for data loading')
     parser.add_argument('--device_id', default='0, 1, 2, 3, 4, 5, 6, 7', type=str, help='Comma-separated list of CUDA device IDs to use')
+    parser.add_argument('--wandb', action='store_true', help='Enable Weights & Biases logging (requires `pip install wandb` + `wandb login`)')
+    parser.add_argument('--wandb_project', type=str, default='deco-maniskill-vitac2026', help='wandb project name')
+    parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity/team (default: your wandb default entity)')
+    parser.add_argument('--wandb_run_name', type=str, default=None, help='wandb run name (default: basename of --logs)')
 
     opt = parser.parse_args()
     main(opt)

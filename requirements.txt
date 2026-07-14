@@ -10,3 +10,5 @@ PyYAML==6.0.3
 einops==0.8.1
 tqdm==4.67.1
 huggingface-hub==0.36.0
+lerobot[dataset]
+wandb
