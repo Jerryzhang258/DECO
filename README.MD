@@ -199,40 +199,26 @@ python train.py
 
 ## 5. Deploy
 
-### Hardware Setup
-- 3D print the active camera in `assets/active_camera`
-- Using [Dynamixel Wizard](https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_wizard2/) to set motor yaw with ID-1 and motor pitch with ID-2. Plug motors into active camera and mount it on H1-2
-- Connect PC and H1-2.
+`deploy/deploy_vitac2026.py` runs the `deco_vitac` model (the ManiSkill-ViTac 2026
+config family) as a control loop: language-conditioned flow-matching inference,
+receding-horizon or temporal-ensembled action selection, and optional async
+observation logging. It owns the inference/timing loop only -- implement
+`RobotEnv.get_obs`/`RobotEnv.send_action` in that file for your actual hardware or
+simulator (camera/tactile capture, robot state readout, and turning a predicted
+delta-pose action into low-level commands are rig-specific and not included).
 
-### Software Setup
-- Follow the guide in [xr_teleoperate](https://github.com/unitreerobotics/xr_teleoperate) to install requirements for deployment.
-- Install [Dynamixel SDK](https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_sdk/overview/)
-
-### Launch Server on Robot (same as xr_teleoperate)
-- Connect to unitree H1_2
 ```shell
-# robot ip
-ssh unitree@192.168.123.167
-```
-```shell
-# launch imager server
-cd teleimager
-conda activate teleimager
-python -m teleimager.image_server
-```
-```shell
-# launch hand server
-cd inspire_hand_ws
-python inspire_hand_sdk/example/Headless_driver_double.py
+python deploy/deploy_vitac2026.py \
+  --yaml config/deco_vitac2026_tactile.yaml \
+  --language-prompt "Pour the black powder into the mortar and grind." \
+  --control-frequency 10 \
+  --save-obs
 ```
 
-### Deploy on Host
-- Modify the checkpoint in deploy_h1.py
-```shell
-# using ifconfig to check the network-interface connected with robot. eg, enx9c69d30201e2
-cd deploy
-python deploy_h1.py --network-interface=enx9c69d30201e2
-```
+Point `model.adapter_model_path` in the yaml at a trained stage-2 checkpoint (or
+`model.pretrain_model_path` with `use_tactile: False` for a stage-1-only vision
+policy) before running -- see `models/deco_vitac/deco_vitac.py`'s `modeling()` for
+which of the two fields to use at inference time vs. during stage-2 training.
 
 # ManiSkill-ViTac 2026 adaptation
 
