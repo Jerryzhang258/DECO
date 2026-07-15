@@ -1,7 +1,7 @@
 """
-Concrete deco_vitac deployment on the real rokae dual-arm rig used to collect the
+Concrete deco_vitac deployment on the real dual-arm rig used to collect the
 black_smash_* datasets -- the same physical hardware as VB-VLA's real_world/
-(UvcCamera + rokae Controller), just running DECO's flow-matching policy instead of
+(UvcCamera + arm Controller), just running DECO's flow-matching policy instead of
 openpi's pi0/pi0.5, and DECO's own action/obs contract instead of VB-VLA's "quest
 pose" one.
 
@@ -62,8 +62,8 @@ def _add_vbvla_to_path(vbvla_root: str):
         sys.path.insert(0, vbvla_root)
 
 
-class RokaeUmiEnv(RobotEnv):
-    """RobotEnv backed by VB-VLA's real_world.BimanualUmiEnv (real rokae arms + UMI
+class RealUmiEnv(RobotEnv):
+    """RobotEnv backed by VB-VLA's real_world.BimanualUmiEnv (real arms + UMI
     fisheye/tactile hand cameras)."""
 
     def __init__(self, cam_path, control_frequency, use_tactile,
@@ -96,7 +96,7 @@ class RokaeUmiEnv(RobotEnv):
             single_arm_mode=single_arm_mode,
         )
         self.env.start(wait=True)
-        print("[RokaeUmiEnv] waiting for cameras/controller...")
+        print("[RealUmiEnv] waiting for cameras/controller...")
         time.sleep(3.0)
 
     def reset_episode(self):
@@ -190,7 +190,7 @@ def main(args):
     quest_2_ee_left = np.load(args.quest_2_ee_left) if args.quest_2_ee_left else None
     quest_2_ee_right = np.load(args.quest_2_ee_right) if args.quest_2_ee_right else None
 
-    env = RokaeUmiEnv(
+    env = RealUmiEnv(
         cam_path=args.cam_path,
         control_frequency=args.control_frequency,
         use_tactile=use_tactile,
